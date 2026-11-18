@@ -389,7 +389,7 @@ $('#undo').onclick = undo; $('#restart').onclick = restart;
 $('#hintBtn').onclick = async () => {
   if (won || hintOn) return;
   if (save.hints <= 0) {
-    if (CG) { toast('Watch a short ad for a free hint'); const ok = await ad('rewarded'); if (!ok) return toast('No ad available right now. Try again soon.'); }
+    if (CG) { toast('Watch a short ad for a free hint'); await ad('rewarded'); } // if no ad can be shown (e.g. during CrazyGames' basic launch), the hint is free anyway
     save.hints = 1; toast('+1 hint');
   }
   save.hints--; persist(); hintOn = true; draw(false);
