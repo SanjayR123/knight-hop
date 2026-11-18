@@ -231,7 +231,7 @@ const chapterOf = (n) => CHAPTERS[Math.min(Math.floor((n - 1) / 10), CHAPTERS.le
 // ---------- state ----------
 const save = (() => { try { return JSON.parse(localStorage.getItem('knighthop') || '{}'); } catch { return {}; } })();
 save.stars ||= {}; save.unlocked ||= 1; if (save.hints == null) save.hints = 3; if (save.sound == null) save.sound = true;
-const persist = () => { try { localStorage.setItem('knighthop', JSON.stringify(save)); } catch {} };
+const persist = () => { const v = JSON.stringify(save); try { localStorage.setItem('knighthop', v); } catch {} try { if (CG) CG.data.setItem('knighthop', v); } catch {} };
 let L, pos, got, history, levelNo, daily = false, hintOn = false, won = false, coachStep = 0;
 
 const $ = (s) => document.querySelector(s);
@@ -331,14 +331,23 @@ function hop(from, to) {
 // ---------- CrazyGames SDK (no-op elsewhere) ----------
 let CG = null, muted = false, completions = 0;
 const cg = (f) => { try { if (CG) f(CG); } catch {} };
-(async () => { try { if (window.CrazyGames && window.CrazyGames.SDK) { await window.CrazyGames.SDK.init(); if (window.CrazyGames.SDK.environment !== 'disabled') CG = window.CrazyGames.SDK; } } catch {} cg((S) => S.game.loadingStop()); draw(false); })();
+let cgMuted = false;
+(async () => {
+  try { if (window.CrazyGames && window.CrazyGames.SDK) { await window.CrazyGames.SDK.init(); if (window.CrazyGames.SDK.environment !== 'disabled') CG = window.CrazyGames.SDK; } } catch {}
+  if (CG) {
+    // Progress lives in the CrazyGames Data Module on CrazyGames (synced to the player's account), localStorage elsewhere.
+    try { const v = CG.data.getItem('knighthop'); if (v) { Object.assign(save, JSON.parse(v)); if (!won && !history.length && !daily) load(Math.min(save.unlocked, save.last || save.unlocked)); } else persist(); } catch {}
+    try { cgMuted = !!CG.game.settings.muteAudio; CG.game.addSettingsChangeListener((st) => { cgMuted = !!st.muteAudio; }); } catch {}
+  }
+  cg((S) => S.game.loadingStop()); draw(false);
+})();
 function ad(type) { return new Promise((res) => { if (!CG) return res(type === 'rewarded'); muted = true; cg((S) => S.game.gameplayStop());
   const done = (ok) => { muted = false; if (!won) cg((S) => S.game.gameplayStart()); res(ok); };
   CG.ad.requestAd(type, { adStarted: () => {}, adFinished: () => done(true), adError: () => done(type !== 'rewarded') }); }); }
 
 // ---------- sound: wooden clack + coin ting ----------
 let ac;
-function ctx() { if (!save.sound || muted) return null; try { ac ||= new AudioContext(); if (ac.state === 'suspended') ac.resume(); return ac; } catch { return null; } }
+function ctx() { if (!save.sound || muted || cgMuted) return null; try { ac ||= new AudioContext(); if (ac.state === 'suspended') ac.resume(); return ac; } catch { return null; } }
 function clack(vol = 0.35) {
   const a = ctx(); if (!a) return;
   const len = Math.floor(a.sampleRate * 0.05), buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
