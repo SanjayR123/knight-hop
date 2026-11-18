@@ -1,0 +1,3 @@
+date,commit,device,levelsCleared,perfectRate,avgMovesOverPar,hintsUsed,restarts,firstHintLevel,errors,uiIssues,loadMs
+2026-11-18,4ee0506,desktop,8,0.62,1.36,1,0,2,0,0,1028
+2026-11-18,4ee0506,phone,8,0.62,1.36,1,0,2,0,0,1110
