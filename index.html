@@ -330,6 +330,8 @@ function hop(from, to) {
 
 // ---------- CrazyGames SDK (no-op elsewhere) ----------
 let CG = null, muted = false, completions = 0;
+// CrazyGames doesn't allow ads during Basic Launch. Flip to true once the game is promoted to Full Launch.
+const ADS_ENABLED = false;
 const cg = (f) => { try { if (CG) f(CG); } catch {} };
 let cgMuted = false;
 (async () => {
@@ -339,9 +341,11 @@ let cgMuted = false;
     try { const v = CG.data.getItem('knighthop'); if (v) { Object.assign(save, JSON.parse(v)); if (!won && !history.length && !daily) load(Math.min(save.unlocked, save.last || save.unlocked)); } else persist(); } catch {}
     try { cgMuted = !!CG.game.settings.muteAudio; CG.game.addSettingsChangeListener((st) => { cgMuted = !!st.muteAudio; }); } catch {}
   }
-  cg((S) => S.game.loadingStop()); draw(false);
+  cg((S) => S.game.loadingStop());
+  if (!won && !$('#sheet').classList.contains('open')) cg((S) => S.game.gameplayStart());
+  draw(false);
 })();
-function ad(type) { return new Promise((res) => { if (!CG) return res(type === 'rewarded'); muted = true; cg((S) => S.game.gameplayStop());
+function ad(type) { return new Promise((res) => { if (!CG || !ADS_ENABLED) return res(type === 'rewarded'); muted = true; cg((S) => S.game.gameplayStop());
   const done = (ok) => { muted = false; if (!won) cg((S) => S.game.gameplayStart()); res(ok); };
   CG.ad.requestAd(type, { adStarted: () => {}, adFinished: () => done(true), adError: () => done(type !== 'rewarded') }); }); }
 
@@ -389,7 +393,7 @@ $('#undo').onclick = undo; $('#restart').onclick = restart;
 $('#hintBtn').onclick = async () => {
   if (won || hintOn) return;
   if (save.hints <= 0) {
-    if (CG) { toast('Watch a short ad for a free hint'); await ad('rewarded'); } // if no ad can be shown (e.g. during CrazyGames' basic launch), the hint is free anyway
+    if (CG && ADS_ENABLED) { toast('Watch a short ad for a free hint'); await ad('rewarded'); } // if no ad can be shown (e.g. during CrazyGames' basic launch), the hint is free anyway
     save.hints = 1; toast('+1 hint');
   }
   save.hints--; persist(); hintOn = true; draw(false);
