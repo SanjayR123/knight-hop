@@ -1,4 +1,4 @@
-"""Weekly automated playtest for Knight Hop.
+"""Weekly automated playtest for Mimic Chess (repo: knight-hop).
 
 Usage:  python3 playtest/run.py [--url URL] [--levels N] [--out DIR]
 
@@ -6,13 +6,15 @@ Produces DIR/metrics.json plus screenshots. It does not judge anything itself;
 the weekly agent reads the metrics and screenshots and writes the report.
 
 What it measures
-  1. Level design (solver over levels 1..100): board size, coins, holes, par,
-     spikes in difficulty, generation time.
+  1. Level design (solver over the 28 campaign levels + first 20 endless):
+     board size, coins, holes, cracks, guards, patrols, portals, par, spikes,
+     unsolvable levels, par mismatches, solve time.
   2. Live site checks on desktop (1366x768) and phone (390x844): load time,
      JS errors, anything off-screen, tap targets under 44px, first-screen text.
   3. Simulated players on a fresh profile:
-       novice  - mostly heads for the nearest coin, makes some random hops,
-                 takes a hint when it has used 2x par, restarts at 4x par
+       novice  - grabs reachable coins, likes badges/captures, otherwise drifts to
+                 the nearest coin, 30% random safe moves, hint at 2x par,
+                 restarts at 4x par
        expert  - plays the optimal line (sanity check that every level is
                  solvable and the win flow works)
 """
@@ -27,52 +29,56 @@ args = ap.parse_args()
 os.makedirs(args.out, exist_ok=True)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ---------- 1. level design via the game's own solver (node) ----------
+# ---------- 1. level design (curated levels shipped in the page) ----------
 html = open(os.path.join(ROOT, 'index.html'), encoding='utf8').read()
-engine = html[html.index('// ---------- seeded random ----------'):html.index('// ---------- hand-made teaching levels')]
-hand = re.search(r'function handLevel\(n\) \{[\s\S]*?\n\}', html).group(0)
-js = engine + '\n' + hand + r'''
+engine = html[html.index('const ENGINE = (() => {'):html.index('const LEVELS = ')]
+levels_json = html[html.index('const LEVELS = ') + len('const LEVELS = '):]
+levels_json = levels_json[:levels_json.index(';\n')]
+DESIGN_JS = """
 const out = [];
-for (let n = 1; n <= 100; n++) {
-  const t0 = Date.now();
-  const L = handLevel(n) || generate(n, n * 7919 + 13);
-  out.push({ n, size: L.size, coins: L.gems.length, holes: L.wall.reduce((a, b) => a + b, 0), par: L.par, genMs: Date.now() - t0 });
+const all = LEVELS.campaign.map((L, i) => [i + 1, L]).concat(LEVELS.endless.slice(0, 20).map((L, i) => [LEVELS.campaign.length + i + 1, L]));
+for (const [n, L] of all) {
+  const t0 = Date.now(); const sol = ENGINE.solve(JSON.parse(JSON.stringify(L)));
+  out.push({ n, size: L.s, coins: L.coins.length, holes: (L.holes || []).length, cracks: (L.cracks || []).length, guards: (L.guards || []).length,
+    patrols: (L.guards || []).filter((g) => g.path.length > 1).length, portals: (L.portals || []).length, par: L.par, solverPar: sol ? sol.length : null, solveMs: Date.now() - t0 });
 }
-console.log(JSON.stringify(out));
-'''
-levels = json.loads(subprocess.run(['node', '-e', js], capture_output=True, text=True, check=True).stdout)
+console.log(JSON.stringify({ campaign: LEVELS.campaign.length, levels: out }));
+"""
+js = engine + '\nconst LEVELS = ' + levels_json + ';\n' + DESIGN_JS
+r = json.loads(subprocess.run(['node', '-e', js], capture_output=True, text=True, check=True).stdout)
+levels = r['levels']; CAMPAIGN = r['campaign']
+CHAPTERS = [('Shapeshifter', 1, 4), ('Crumbling Floor', 5, 10), ('Guards', 11, 16), ('Patrols', 17, 22), ('Portals', 23, 28)]
 spikes = [{'from': a['n'], 'to': b['n'], 'parFrom': a['par'], 'parTo': b['par']} for a, b in zip(levels, levels[1:]) if b['par'] - a['par'] >= 4]
 drops = [{'from': a['n'], 'to': b['n'], 'parFrom': a['par'], 'parTo': b['par']} for a, b in zip(levels, levels[1:]) if a['par'] - b['par'] >= 4]
 design = {
-    'levels': levels, 'spikes': spikes, 'drops': drops,
-    'parByChapter': [round(statistics.mean(l['par'] for l in levels[i:i + 10]), 1) for i in range(0, 100, 10)],
-    'slowestGenMs': max(l['genMs'] for l in levels),
+    'levels': levels, 'spikes': spikes, 'drops': drops, 'campaignLevels': CAMPAIGN,
+    'parByChapter': {name: round(statistics.mean(l['par'] for l in levels if lo <= l['n'] <= hi), 1) for name, lo, hi in CHAPTERS},
+    'unsolvable': [l['n'] for l in levels if l['solverPar'] is None],
+    'parMismatch': [l['n'] for l in levels if l['solverPar'] is not None and l['solverPar'] != l['par']],
+    'slowestSolveMs': max(l['solveMs'] for l in levels),
 }
 
 # ---------- 2 + 3. browser runs ----------
 from playwright.async_api import async_playwright
 
-NOVICE_JS = r'''() => {
-  // Called with the game's globals in scope (classic script => they live on the global lexical scope).
-  return { pos, par: L.par, size: L.size, wall: Array.from(L.wall), gems: L.gems, got: Array.from(got), moves: history.length, won };
-}'''
+NOVICE_JS = """() => {
+  // Game globals live on the global lexical scope of the classic script.
+  const P = ENGINE.prep(L);
+  const coinsLeft = L.coins.filter((g) => !((st.coins >> P.coinIdx[g]) & 1));
+  return { pos: st.pos, piece: st.piece, par: L.par, size: L.s, coinsLeft, moves: history.length, won, busy };
+}"""
 
-def bfs_dist(size, wall, start, goal):
-    from collections import deque
-    J = [(1,2),(2,1),(2,-1),(1,-2),(-1,-2),(-2,-1),(-2,1),(-1,2)]
-    seen = {start: 0}; q = deque([start])
-    while q:
-        p = q.popleft()
-        if p == goal: return seen[p]
-        x, y = p % size, p // size
-        for dx, dy in J:
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < size and 0 <= ny < size and not wall[ny * size + nx]:
-                np_ = ny * size + nx
-                if np_ not in seen: seen[np_] = seen[p] + 1; q.append(np_)
-    return 99
+def cheb(size, a, b):
+    return max(abs(a % size - b % size), abs(a // size - b // size))
+
+async def wait_idle(pg):
+    for _ in range(40):
+        await pg.wait_for_timeout(60)
+        if not await pg.evaluate('busy'): return
 
 async def play_level(pg, style, rng):
+    """novice: grabs coins it can reach, likes badges and captures, otherwise drifts toward the nearest coin,
+    30% random safe moves, takes a hint at 2x par, restarts at 4x par. expert: follows hints (optimal line)."""
     stats = {'moves': 0, 'hints': 0, 'restarts': 0, 'ms': 0}
     t0 = time.time()
     for step in range(400):
@@ -80,18 +86,23 @@ async def play_level(pg, style, rng):
         if st['won']: break
         if style == 'expert':
             await pg.evaluate('save.hints = 9'); await pg.click('#hintBtn'); stats['hints'] += 1
-            await pg.click('.cell.hint'); await pg.wait_for_timeout(520); continue
+            await pg.click('.cell.hint'); await wait_idle(pg); continue
         if st['moves'] >= 4 * st['par'] and stats['restarts'] < 2:
             await pg.click('#restart'); stats['restarts'] += 1; await pg.wait_for_timeout(300); continue
         if st['moves'] >= 2 * st['par'] * (stats['hints'] + 1):
-            await pg.click('#hintBtn'); stats['hints'] += 1; await pg.wait_for_timeout(80)
-            if await pg.locator('.cell.hint').count(): await pg.click('.cell.hint'); await pg.wait_for_timeout(520); continue
-        targets = await pg.eval_on_selector_all('.cell.target', 'e => e.map(c => +c.dataset.i)')
-        if not targets: break
-        left = [g for g in st['gems'] if g not in st['got']]
-        def score(t): return min(bfs_dist(st['size'], st['wall'], t, g) for g in left) if left else 0
-        choice = rng.choice(targets) if rng.random() < 0.3 else min(targets, key=score)
-        await pg.click(f'.cell[data-i="{choice}"]'); await pg.wait_for_timeout(520)
+            await pg.click('#hintBtn'); stats['hints'] += 1; await pg.wait_for_timeout(120)
+            if await pg.locator('.cell.hint').count(): await pg.click('.cell.hint'); await wait_idle(pg); continue
+        targets = await pg.eval_on_selector_all('.cell.target:not(.bad)', 'e => e.map(c => +c.dataset.i)')
+        if not targets:
+            await pg.click('#restart'); stats['restarts'] += 1; await pg.wait_for_timeout(300); continue
+        items = await pg.eval_on_selector_all('.cell.target.onitem:not(.bad), .cell.target.cap', 'e => e.map(c => +c.dataset.i)')
+        coins_here = [t for t in targets if t in st['coinsLeft']]
+        if coins_here: choice = coins_here[0]
+        elif items and rng.random() < 0.6: choice = rng.choice(items)
+        elif rng.random() < 0.3 or not st['coinsLeft']: choice = rng.choice(targets)
+        else: choice = min(targets, key=lambda t: min(cheb(st['size'], t, g) for g in st['coinsLeft']))
+        await pg.click(f'.cell[data-i="{choice}"]'); await wait_idle(pg)
+    await pg.wait_for_timeout(400)
     st = await pg.evaluate(NOVICE_JS)
     stats.update(moves=st['moves'], par=st['par'], won=st['won'], ms=int((time.time() - t0) * 1000))
     stats['seal'] = await pg.evaluate("document.body.classList.contains('won') ? document.querySelector('#resTitle').textContent : null")
@@ -131,7 +142,8 @@ async def device_run(p, name, vp, touch):
         if n in (1, 3, 10): await shot(f'won-level-{n}')
         if not r['won']: break
         await pg.click('#next'); await pg.wait_for_timeout(350)
-        if n == 5: await shot('level-6-start')
+        if n == 4: await shot('level-5-start')
+        if n == 10: await shot('level-11-start')
     await pg.click('#levelsBtn'); await pg.wait_for_timeout(450); await shot('levels-sheet')
     await pg.click('#dailyBtn'); await pg.wait_for_timeout(400); await shot('daily')
     expert_daily = await play_level(pg, 'expert', rng)
